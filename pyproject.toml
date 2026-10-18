@@ -2,13 +2,13 @@
 name = "hardware-judge-signal"
 version = "0.1.0"
 description = "Monthly hardware price direction research service"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 
 [project.scripts]
 hardware-signal = "hardware_signal.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

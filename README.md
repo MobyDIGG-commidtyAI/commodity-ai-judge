@@ -13,13 +13,23 @@ show predictive accuracy. The rubric and its sources: [docs/rubric.md](docs/rubr
 
 ```mermaid
 flowchart LR
-  sched["Cloud Scheduler"] --> caller["commodity-ai-caller<br/>Cloud Run Job"]
-  caller -- "export/news_feed.csv" --> bucket[("Cloud Storage bucket<br/>private")]
-  sched --> judge["commodity-ai-judge<br/>Cloud Run Job (this repo)"]
-  bucket -- "news feed + price contract" --> judge
-  judge -- "OpenRouter: chat rubric (DDR5)<br/>Jev decisions (GPU articles)" --> llm(["OpenRouter"])
-  judge -- "export/judge.json" --> bucket
-  bucket -- "read-only mount" --> api["commodity-ai-backend<br/>Cloud Run service"]
+  shopper(["Shopper on<br/>Shopee / Lazada"]) --> extension["commodity-ai-extension<br/>Chrome extension (developer mode)"]
+  extension -->|HTTPS /api/v2/assessment| api
+  browser(["Browser"]) -->|/dashboard| api
+
+  subgraph gcp["Google Cloud · asia-southeast1"]
+    scheduler["Cloud Scheduler<br/>09:00 Asia/Bangkok"] --> job["Cloud Run Job<br/>commodity-ai-caller"]
+    scheduler --> judge["Cloud Run Job<br/>commodity-ai-judge (this repo)"]
+    job -->|export/news_feed.csv · read-write| bucket[("Cloud Storage<br/>private · versioned bucket<br/>tank.db · export/")]
+    bucket -->|read-only mount| api["Cloud Run service<br/>commodity-ai-backend · public"]
+    job -->|write| sql[("Cloud SQL<br/>application database")]
+    sql -->|read| api
+    bucket -->|news feed + price contract| judge
+    judge -->|export/judge.json| bucket
+  end
+
+  job --> sources["TrendForce · Reddit<br/>RSS · price indexes"]
+  judge -->|DDR5 chat rubric and GPU article decisions| openrouter["OpenRouter"]
 ```
 
 ## One daily run (`scripts/cloud_job.sh`)
@@ -54,11 +64,20 @@ flowchart LR
 | `NEWS_FEED` | `$DATA_MOUNT/export/news_feed.csv` (set by the job script) | `dataset/ohm/news_feed.csv` |
 | `MAX_ARTICLES` | `20` | `20` |
 
-No third-party Python packages are needed.
+The job needs no third-party Python packages. The local test environment uses
+Python 3.12.15 and pinned test tools in `environment.yml` and `requirements-dev.txt`.
+
+## Local environment
+
+```bash
+CONDA_PKGS_DIRS=./.conda/pkgs conda env create --prefix ./.conda/codex/dev --file environment.yml
+source "$(conda info --base)/etc/profile.d/conda.sh" && conda activate "./.conda/codex/dev" && python -m pip install -r requirements-dev.txt
+```
 
 ## Run locally
 
 ```bash
+source "$(conda info --base)/etc/profile.d/conda.sh" && conda activate "./.conda/codex/dev"
 cp .env.example .env    # add OPENROUTER_API_KEY and OPENROUTER_MODEL; point DATA_DIR / NEWS_FEED at local copies
 PYTHONPATH=src python -m hardware_signal.cli daily --output output/judge.json
 ```
@@ -68,7 +87,7 @@ The research commands (case export, backtests, evaluation, HTTP API) are describ
 ## Test
 
 ```bash
-pip install pytest && python -m pytest -q
+source "$(conda info --base)/etc/profile.d/conda.sh" && conda activate "./.conda/codex/dev" && PYTHONPATH=src python -m pytest -q
 ```
 
 Tests that need the team dataset (a teammate's price contract and news archive, kept private) are skipped unless
@@ -76,15 +95,25 @@ Tests that need the team dataset (a teammate's price contract and news archive, 
 
 ## Deploy (Google Cloud)
 
+This image runs as a **Cloud Run Job**, not a Cloud Run Service. Build and push it
+to an Artifact Registry repository, then deploy the image as a job:
+
 ```bash
-gcloud run jobs deploy cai-judge --region <REGION> --image <IMAGE> \
+export PROJECT_ID=your-project-id
+export REPO=your-repository-name
+export REGION=asia-southeast1
+export IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/commodity-ai-judge:latest"
+gcloud builds submit --tag "$IMAGE" .
+gcloud run jobs deploy commodity-ai-judge --region "$REGION" --image "$IMAGE" \
   --set-env-vars DATA_MOUNT=/mnt/tank,OPENROUTER_MODEL=<author/model> \
   --set-secrets OPENROUTER_API_KEY=<secret-name>:latest \
   --add-volume name=tank,type=cloud-storage,bucket=<BUCKET> --add-volume-mount volume=tank,mount-path=/mnt/tank \
   --memory 512Mi --cpu 1 --task-timeout 30m --max-retries 0
 ```
 
-Schedule it after the caller job (for example 09:45 Asia/Bangkok). Cost: about 1 chat call plus up to 8 Jev calls a day.
+Do not use a Cloud Run Service source-deploy trigger for this image: it does not
+listen on `PORT=8080`. Schedule the judge after the caller job has finished and
+published `export/news_feed.csv`. Cost: about 1 chat call plus up to 8 Jev calls a day.
 
 ## License
 
